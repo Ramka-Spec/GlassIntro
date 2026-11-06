@@ -44,7 +44,7 @@ jobs:
           $form.Text = 'glass-test'
           $form.Show()
           $iconBefore = [W]::S($form.Handle, 0x7F, [IntPtr]1, [IntPtr]::Zero)
-          1..120 | ForEach-Object { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+          1..300 | ForEach-Object { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
           $ex = [W]::G($form.Handle, -20).ToInt64()
           $iconAfter = [W]::S($form.Handle, 0x7F, [IntPtr]1, [IntPtr]::Zero)
           $crashed = $app.HasExited
