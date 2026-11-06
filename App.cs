@@ -84,7 +84,8 @@ namespace GlassIntro
             engine.Exited += Exit;
             watcher.Tick += delegate { island.SetSuppressed(engine.IsForegroundFullscreen()); };
             watcher.Start();
-            var ignored = media.StartAsync();
+            // Запуск внутри диспетчера, чтобы продолжения после await шли в потоке интерфейса.
+            Dispatcher.CurrentDispatcher.BeginInvoke(new Action(() => { var ignored = media.StartAsync(); }));
         }
 
         private void Exit()
