@@ -103,6 +103,20 @@ namespace GlassIntro
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out int value, int size);
         [DllImport("dwmapi.dll", EntryPoint = "DwmGetWindowAttribute")] public static extern int DwmGetWindowRect(IntPtr hwnd, int attribute, out RECT value, int size);
         [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr LoadImage(IntPtr instance, string name, uint type, int width, int height, uint flags);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam, uint flags, uint timeout, out IntPtr result);
+
+        public const uint WM_GETICON = 0x007F;
+        public const uint WM_SETICON = 0x0080;
+
+        public static IntPtr Message(IntPtr hwnd, uint message, int which, IntPtr value)
+        {
+            IntPtr result;
+            // SMTO_ABORTIFHUNG: зависшая программа не должна останавливать GlassIntro.
+            if (SendMessageTimeout(hwnd, message, new IntPtr(which), value, 0x0002, 300, out result) == IntPtr.Zero) return IntPtr.Zero;
+            return result;
+        }
 
         public static void SetAccent(IntPtr hwnd, int state, uint color)
         {
@@ -241,7 +255,10 @@ namespace GlassIntro
         public event Action<string> Notify;
         private readonly Dispatcher dispatcher = Dispatcher.CurrentDispatcher;
         private readonly Dictionary<IntPtr, long> applied = new Dictionary<IntPtr, long>();
-        private readonly HashSet<IntPtr> layeredTaskbars = new HashSet<IntPtr>();
+        private sealed class IconPair { public IntPtr Big, Small; }
+        private readonly Dictionary<string, IconPair> appIcons = new Dictionary<string, IconPair>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> pendingIcons = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<IntPtr, IconPair> originalIcons = new Dictionary<IntPtr, IconPair>();
         private readonly Dictionary<uint, string> processNames = new Dictionary<uint, string>();
         private readonly HashSet<string> excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly string excludeFile = Path.Combine(Settings.Folder, "exclude.txt");
@@ -355,7 +372,11 @@ namespace GlassIntro
             settings.Icons = on;
             settings.Save();
             if (on) ApplyIcons();
-            else GlassIcons.Restore();
+            else
+            {
+                RestoreWindowIcons();
+                GlassIcons.Restore();
+            }
             RaiseChanged();
         }
 
@@ -402,12 +423,16 @@ namespace GlassIntro
             List<IntPtr> dead = new List<IntPtr>();
             foreach (IntPtr h in applied.Keys) if (!Native.IsWindow(h)) dead.Add(h);
             foreach (IntPtr h in dead) applied.Remove(h);
+            dead.Clear();
+            foreach (IntPtr h in originalIcons.Keys) if (!Native.IsWindow(h)) dead.Add(h);
+            foreach (IntPtr h in dead) originalIcons.Remove(h);
 
             List<IntPtr> windows = new List<IntPtr>();
             Native.EnumWindows(delegate(IntPtr h, IntPtr p) { windows.Add(h); return true; }, IntPtr.Zero);
             foreach (IntPtr h in windows)
             {
                 if (settings.Enabled) Process(h);
+                GlassWindowIcon(h);
                 if (settings.Taskbar)
                 {
                     string cls = Native.ClassOf(h);
@@ -418,17 +443,8 @@ namespace GlassIntro
 
         private void ApplyTaskbar(IntPtr h)
         {
+            // Только фон. Прозрачность всего окна панели затемняла бы значки.
             Native.SetAccent(h, TaskbarAccent(), GlassTint);
-            if (build < 22000) return;
-            // На Windows 11 панель рисует свой фон поверх размытия, поэтому делаем её полупрозрачной целиком.
-            long ex = Native.GetWindowLongPtr(h, Native.GWL_EXSTYLE).ToInt64();
-            if ((ex & Native.WS_EX_LAYERED) != 0 && !layeredTaskbars.Contains(h)) return;
-            if ((ex & Native.WS_EX_LAYERED) == 0)
-            {
-                Native.SetWindowLongPtr(h, Native.GWL_EXSTYLE, new IntPtr(ex | Native.WS_EX_LAYERED));
-                layeredTaskbars.Add(h);
-            }
-            Native.SetLayeredWindowAttributes(h, 0, 190, Native.LWA_ALPHA);
         }
 
         private int TaskbarAccent()
@@ -440,7 +456,68 @@ namespace GlassIntro
         {
             if (hwnd == IntPtr.Zero || idObject != 0 || idChild != 0) return;
             if (settings.Enabled) Process(hwnd);
+            if (evt != Native.EVENT_OBJECT_LOCATIONCHANGE) GlassWindowIcon(hwnd);
             if (evt == Native.EVENT_SYSTEM_FOREGROUND && applied.ContainsKey(hwnd)) lastGlassIntrodow = hwnd;
+        }
+
+        /// <summary>Стеклянный значок запущенной программы на панели задач и в заголовке окна.</summary>
+        private void GlassWindowIcon(IntPtr hwnd)
+        {
+            if (!settings.Icons || !Native.IsWindow(hwnd)) return;
+            if (Native.GetWindow(hwnd, 4) != IntPtr.Zero) return;
+            if (Native.ClassOf(hwnd) == "ApplicationFrameWindow" || !IsEligible(hwnd)) return;
+            uint pid;
+            Native.GetWindowThreadProcessId(hwnd, out pid);
+            string path = PathOf(pid);
+            if (path.Length == 0) return;
+
+            IconPair pair;
+            if (!appIcons.TryGetValue(path, out pair))
+            {
+                if (pendingIcons.Add(path))
+                {
+                    GlassIcons.PrepareAsync(path, ico => dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        pendingIcons.Remove(path);
+                        appIcons[path] = LoadPair(ico);
+                        Scan();
+                    })));
+                }
+                return;
+            }
+            if (pair == null) return;
+            IntPtr current = Native.Message(hwnd, Native.WM_GETICON, 1, IntPtr.Zero);
+            if (current == pair.Big) return;
+            if (!originalIcons.ContainsKey(hwnd))
+            {
+                IconPair original = new IconPair();
+                original.Big = current;
+                original.Small = Native.Message(hwnd, Native.WM_GETICON, 0, IntPtr.Zero);
+                originalIcons[hwnd] = original;
+            }
+            Native.Message(hwnd, Native.WM_SETICON, 1, pair.Big);
+            Native.Message(hwnd, Native.WM_SETICON, 0, pair.Small);
+        }
+
+        private static IconPair LoadPair(string ico)
+        {
+            if (ico == null) return null;
+            const uint IMAGE_ICON = 1, LR_LOADFROMFILE = 0x10;
+            IconPair pair = new IconPair();
+            pair.Big = Native.LoadImage(IntPtr.Zero, ico, IMAGE_ICON, 48, 48, LR_LOADFROMFILE);
+            pair.Small = Native.LoadImage(IntPtr.Zero, ico, IMAGE_ICON, 24, 24, LR_LOADFROMFILE);
+            return pair.Big == IntPtr.Zero ? null : pair;
+        }
+
+        private void RestoreWindowIcons()
+        {
+            foreach (KeyValuePair<IntPtr, IconPair> item in originalIcons)
+            {
+                if (!Native.IsWindow(item.Key)) continue;
+                Native.Message(item.Key, Native.WM_SETICON, 1, item.Value.Big);
+                Native.Message(item.Key, Native.WM_SETICON, 0, item.Value.Small);
+            }
+            originalIcons.Clear();
         }
 
         private void Process(IntPtr hwnd)
@@ -537,27 +614,30 @@ namespace GlassIntro
             }
             catch (ArgumentException) { name = ""; }
             catch (InvalidOperationException) { name = ""; }
-            if (IsGamePath(pid)) name = "";
+            if (IsGamePath(PathOf(pid))) name = "";
             processNames[pid] = name;
             return name;
         }
 
         /// <summary>Игры из Steam, Epic и Riot не меняются, даже если запущены в окне.</summary>
-        private static bool IsGamePath(uint pid)
+        private static bool IsGamePath(string full)
+        {
+            foreach (string marker in new string[] { @"\steamapps\", @"\Epic Games\", @"\Riot Games\" })
+            {
+                if (full.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+            return false;
+        }
+
+        private static string PathOf(uint pid)
         {
             IntPtr process = Native.OpenProcess(Native.PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
-            if (process == IntPtr.Zero) return false;
+            if (process == IntPtr.Zero) return "";
             try
             {
                 StringBuilder path = new StringBuilder(1024);
                 uint size = (uint)path.Capacity;
-                if (!Native.QueryFullProcessImageName(process, 0, path, ref size)) return false;
-                string full = path.ToString();
-                foreach (string marker in new string[] { @"\steamapps\", @"\Epic Games\", @"\Riot Games\" })
-                {
-                    if (full.IndexOf(marker, StringComparison.OrdinalIgnoreCase) >= 0) return true;
-                }
-                return false;
+                return Native.QueryFullProcessImageName(process, 0, path, ref size) ? path.ToString() : "";
             }
             finally
             {
@@ -595,16 +675,7 @@ namespace GlassIntro
                 if (cls == "Shell_TrayWnd" || cls == "Shell_SecondaryTrayWnd") bars.Add(h);
                 return true;
             }, IntPtr.Zero);
-            foreach (IntPtr h in bars)
-            {
-                Native.SetAccent(h, Native.ACCENT_DISABLED, 0);
-                if (layeredTaskbars.Remove(h))
-                {
-                    long ex = Native.GetWindowLongPtr(h, Native.GWL_EXSTYLE).ToInt64();
-                    Native.SetLayeredWindowAttributes(h, 0, 255, Native.LWA_ALPHA);
-                    Native.SetWindowLongPtr(h, Native.GWL_EXSTYLE, new IntPtr(ex & ~Native.WS_EX_LAYERED));
-                }
-            }
+            foreach (IntPtr h in bars) Native.SetAccent(h, Native.ACCENT_DISABLED, 0);
         }
 
         private void EnableSystemTransparency()
@@ -717,6 +788,13 @@ namespace GlassIntro
             hotkey.Release();
             RestoreAll();
             ClearTaskbar();
+            RestoreWindowIcons();
+            foreach (IconPair pair in appIcons.Values)
+            {
+                if (pair == null) continue;
+                Native.DestroyIcon(pair.Big);
+                Native.DestroyIcon(pair.Small);
+            }
             GlassIcons.Restore();
             RestoreSystemTransparency();
             Action handler = Exited;

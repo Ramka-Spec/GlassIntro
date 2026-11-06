@@ -154,6 +154,10 @@ namespace GlassIntro
         private readonly Stopwatch watch = new Stopwatch();
         private readonly RectangleGeometry clip = new RectangleGeometry();
         private readonly bool activatable;
+        private readonly Brush glassEdge;
+        private readonly Brush glassFill;
+        private readonly Rectangle sheen;
+        private bool blurred = true;
         private bool rendering;
         private bool hideWhenDone;
         private double lastTime;
@@ -187,15 +191,17 @@ namespace GlassIntro
                 new GradientStop(Ui.White(25), 0.6),
                 new GradientStop(Ui.White(130), 1)
             }, new Point(0, 0), new Point(1, 1));
-            Surface.Background = new LinearGradientBrush(new GradientStopCollection
+            glassEdge = Surface.BorderBrush;
+            glassFill = new LinearGradientBrush(new GradientStopCollection
             {
                 new GradientStop(Color.FromArgb(58, 255, 255, 255), 0),
                 new GradientStop(Color.FromArgb(18, 255, 255, 255), 0.5),
                 new GradientStop(Color.FromArgb(34, 255, 255, 255), 1)
             }, new Point(0, 0), new Point(0.4, 1));
+            Surface.Background = glassFill;
             Host.Clip = clip;
 
-            Rectangle sheen = new Rectangle
+            sheen = new Rectangle
             {
                 Height = 46,
                 VerticalAlignment = VerticalAlignment.Top,
@@ -219,7 +225,20 @@ namespace GlassIntro
             long ex = Native.GetWindowLongPtr(Handle, Native.GWL_EXSTYLE).ToInt64() | Native.WS_EX_TOOLWINDOW;
             if (!activatable) ex |= Native.WS_EX_NOACTIVATE;
             Native.SetWindowLongPtr(Handle, Native.GWL_EXSTYLE, new IntPtr(ex));
-            Native.SetAccent(Handle, Native.ACCENT_ACRYLIC, 0x38141414);
+            if (blurred) Native.SetAccent(Handle, Native.ACCENT_ACRYLIC, 0x38141414);
+            UpdateRegion();
+        }
+
+        /// <summary>true: стекло с размытием. false: сплошная тёмная поверхность со сглаженными краями.</summary>
+        protected void SetGlass(bool on)
+        {
+            if (blurred == on) return;
+            blurred = on;
+            Surface.Background = on ? glassFill : new SolidColorBrush(Color.FromRgb(10, 10, 12));
+            Surface.BorderBrush = on ? glassEdge : Ui.Brush(28);
+            sheen.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            if (Handle == IntPtr.Zero) return;
+            Native.SetAccent(Handle, on ? Native.ACCENT_ACRYLIC : Native.ACCENT_DISABLED, 0x38141414);
             UpdateRegion();
         }
 
@@ -285,6 +304,12 @@ namespace GlassIntro
         private void UpdateRegion()
         {
             if (Handle == IntPtr.Zero) return;
+            if (!blurred)
+            {
+                // Без размытия форму рисует сам WPF: края получаются сглаженными.
+                Native.SetWindowRgn(Handle, IntPtr.Zero, true);
+                return;
+            }
             PresentationSource source = PresentationSource.FromVisual(this);
             double scale = source != null && source.CompositionTarget != null
                 ? source.CompositionTarget.TransformToDevice.M11 : 1;

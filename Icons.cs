@@ -19,7 +19,9 @@ namespace GlassIntro
     {
         private static readonly string Folder = System.IO.Path.Combine(Settings.Folder, "icons");
         private static readonly string BackupFile = System.IO.Path.Combine(Folder, "backup.tsv");
-        private static readonly int[] Sizes = { 256, 64, 48, 32 };
+        private static readonly int[] Sizes = { 256, 64, 48, 32, 24, 16 };
+        private const string Style = "v2";
+        private static readonly string StyleStamp = System.IO.Path.Combine(Folder, Style + ".stamp");
         private static readonly object Gate = new object();
 
         [StructLayout(LayoutKind.Sequential)]
@@ -82,12 +84,13 @@ namespace GlassIntro
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
                 System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                    @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar")
+                    @"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"),
+                Environment.GetFolderPath(Environment.SpecialFolder.Programs),
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonPrograms)
             };
             foreach (string folder in folders)
             {
-                if (!Directory.Exists(folder)) continue;
-                foreach (string file in Directory.GetFiles(folder))
+                foreach (string file in FilesIn(folder))
                 {
                     string ext = System.IO.Path.GetExtension(file);
                     if (ext.Equals(".lnk", StringComparison.OrdinalIgnoreCase)
@@ -96,11 +99,61 @@ namespace GlassIntro
             }
         }
 
+        private static List<string> FilesIn(string folder)
+        {
+            List<string> found = new List<string>();
+            if (!Directory.Exists(folder)) return found;
+            try
+            {
+                found.AddRange(Directory.GetFiles(folder));
+                foreach (string child in Directory.GetDirectories(folder)) found.AddRange(FilesIn(child));
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (IOException) { }
+            return found;
+        }
+
+        public static void PrepareAsync(string exe, Action<string> finished)
+        {
+            Thread thread = new Thread(() =>
+            {
+                string result = null;
+                try
+                {
+                    lock (Gate)
+                    {
+                        Directory.CreateDirectory(Folder);
+                        string ico = System.IO.Path.Combine(Folder, Hash(Style + "app" + exe) + ".ico");
+                        if (!File.Exists(ico))
+                        {
+                            BitmapSource source = LoadShellImage(exe);
+                            if (source != null) WriteIco(source, ico);
+                        }
+                        if (File.Exists(ico)) result = ico;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Program.Log(e);
+                }
+                finished(result);
+            });
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.IsBackground = true;
+            thread.Start();
+        }
+
         private static int Apply()
         {
             lock (Gate)
             {
                 Directory.CreateDirectory(Folder);
+                if (!File.Exists(StyleStamp))
+                {
+                    // Значки прошлого оформления пересоздаём из оригиналов.
+                    Restore();
+                    File.WriteAllText(StyleStamp, Style);
+                }
                 Dictionary<string, string> backup = LoadBackup();
                 int count = 0;
                 foreach (string file in Shortcuts())
@@ -109,7 +162,7 @@ namespace GlassIntro
                     {
                         string current = ReadIcon(file);
                         if (current.IndexOf(Folder, StringComparison.OrdinalIgnoreCase) >= 0) continue;
-                        string ico = System.IO.Path.Combine(Folder, Hash(file) + ".ico");
+                        string ico = System.IO.Path.Combine(Folder, Hash(Style + file) + ".ico");
                         BitmapSource source = LoadShellImage(file);
                         if (source == null) continue;
                         WriteIco(source, ico);
@@ -305,9 +358,9 @@ namespace GlassIntro
             {
                 LinearGradientBrush body = new LinearGradientBrush(new GradientStopCollection
                 {
-                    new GradientStop(Color.FromArgb(150, 255, 255, 255), 0),
-                    new GradientStop(Color.FromArgb(70, 215, 230, 245), 0.55),
-                    new GradientStop(Color.FromArgb(110, 235, 242, 250), 1)
+                    new GradientStop(Color.FromArgb(195, 255, 255, 255), 0),
+                    new GradientStop(Color.FromArgb(130, 232, 240, 250), 0.55),
+                    new GradientStop(Color.FromArgb(170, 245, 249, 255), 1)
                 }, new Point(0, 0), new Point(0.5, 1));
                 LinearGradientBrush edge = new LinearGradientBrush(new GradientStopCollection
                 {
@@ -317,14 +370,12 @@ namespace GlassIntro
                 }, new Point(0, 0), new Point(1, 1));
                 dc.DrawRoundedRectangle(body, new Pen(edge, Math.Max(1, s * 0.012)), tile, radius, radius);
 
-                double inner = s * 0.6;
-                dc.PushOpacity(0.96);
+                double inner = s * 0.66;
                 dc.DrawImage(icon, new Rect((s - inner) / 2, (s - inner) / 2, inner, inner));
-                dc.Pop();
 
                 // Блик сверху, как на выпуклом стекле.
                 dc.PushClip(new RectangleGeometry(tile, radius, radius));
-                dc.DrawEllipse(new LinearGradientBrush(Color.FromArgb(120, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90),
+                dc.DrawEllipse(new LinearGradientBrush(Color.FromArgb(95, 255, 255, 255), Color.FromArgb(0, 255, 255, 255), 90),
                     null, new Point(s / 2, s * 0.06), s * 0.62, s * 0.34);
                 dc.Pop();
             }

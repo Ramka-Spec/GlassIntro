@@ -47,6 +47,7 @@ namespace GlassIntro
             Host.Children.Add(full);
             full.Opacity = 0;
             full.IsHitTestVisible = false;
+            SetGlass(false);
             Snap(150, 36, 18, 0);
 
             Surface.MouseEnter += delegate { hovered = true; UpdateState(); };
@@ -266,6 +267,7 @@ namespace GlassIntro
                 SetBars(media.Playing);
             }
             bool expanded = hovered || peeking;
+            SetGlass(expanded);
             Ui.Fade(compact, expanded ? 0 : 1, 140);
             Ui.Fade(full, expanded ? 1 : 0, expanded ? 240 : 120);
             compact.IsHitTestVisible = !expanded;
