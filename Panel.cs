@@ -14,9 +14,7 @@ namespace GlassIntro
         private readonly Tile glass;
         private readonly Tile player;
         private readonly Tile taskbar;
-        private readonly Tile fade;
-        private readonly Segments modes;
-        private readonly GlassSlider strength = new GlassSlider(Icons.Drop);
+        private readonly Tile icons;
         private readonly GlassSlider volume = new GlassSlider(Icons.Volume);
         private readonly TextBlock autostartLabel = Ui.Text("", 14);
         private double fullHeight;
@@ -30,19 +28,13 @@ namespace GlassIntro
             Title = "GlassIntro";
 
             stack.Children.Add(Heading());
-            glass = new Tile(Icons.Sparkle, "Стекло", engine.ToggleEnabled);
+            glass = new Tile(Icons.Windows, "Плавные края", engine.ToggleEnabled);
             player = new Tile(Icons.Music, "Мини-плеер", () => engine.SetPlayer(!engine.settings.Player));
             taskbar = new Tile(Icons.Taskbar, "Панель задач", () => engine.SetTaskbar(!engine.settings.Taskbar));
-            fade = new Tile(Icons.Windows, "Плавные окна", () => engine.SetFade(!engine.settings.Fade));
-            stack.Children.Add(TileRow(glass, player));
-            stack.Children.Add(TileRow(taskbar, fade));
+            icons = new Tile(Icons.Sparkle, "Стеклянные значки", () => engine.SetIcons(!engine.settings.Icons));
+            stack.Children.Add(TileRow(glass, icons));
+            stack.Children.Add(TileRow(player, taskbar));
 
-            modes = new Segments(new[] { "Акрил", "Размытие", "Заголовки" },
-                new[] { true, true, engine.Build >= 22621 }, i => engine.SetMode((Effect)i));
-            stack.Children.Add(modes);
-
-            strength.Changed += v => engine.SetPercent((int)Math.Round(5 + v * 25));
-            stack.Children.Add(strength);
             volume.Changed += Audio.Set;
             stack.Children.Add(volume);
 
@@ -106,9 +98,7 @@ namespace GlassIntro
             glass.Set(s.Enabled);
             player.Set(s.Player);
             taskbar.Set(s.Taskbar);
-            fade.Set(s.Fade);
-            modes.Select((int)s.Mode);
-            strength.Set((s.Percent - 5) / 25.0);
+            icons.Set(s.Icons);
             autostartLabel.Text = (GlassEngine.IsAutostart() ? "✓  " : "") + "Запускать вместе с Windows";
         }
 

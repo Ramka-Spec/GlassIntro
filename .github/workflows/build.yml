@@ -29,20 +29,27 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: GlassIntro
-      - name: Start app and check a test window
+      - name: Start app and check windows, icons and panel
         shell: powershell
         run: |
           Add-Type -AssemblyName System.Windows.Forms
           Add-Type 'using System;using System.Runtime.InteropServices;public class W{[DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")]public static extern IntPtr G(IntPtr h,int i);}'
-          $app = Start-Process .\GlassIntro.exe -PassThru
+          $shell = New-Object -ComObject WScript.Shell
+          $path = Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'GlassTest.lnk'
+          $link = $shell.CreateShortcut($path)
+          $link.TargetPath = "$env:WINDIR\system32\notepad.exe"
+          $link.Save()
+          $app = Start-Process .\GlassIntro.exe -ArgumentList '--test-panel' -PassThru
           $form = New-Object System.Windows.Forms.Form
           $form.Text = 'glass-test'
           $form.Show()
-          1..100 | ForEach-Object { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+          1..120 | ForEach-Object { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
           $ex = [W]::G($form.Handle, -20).ToInt64()
           $crashed = $app.HasExited
+          $icon = $shell.CreateShortcut($path).IconLocation
           if (-not $crashed) { Stop-Process -Id $app.Id -Force }
           $log = Join-Path $env:APPDATA 'GlassIntro\error.log'
-          if (Test-Path $log) { Get-Content $log -TotalCount 6 | ForEach-Object { Write-Host "::error::$_" } ; exit 1 }
+          if (Test-Path $log) { Get-Content $log -TotalCount 8 | ForEach-Object { Write-Host "::error::$_" } ; exit 1 }
           if ($crashed) { Write-Host "::error::GlassIntro crashed"; exit 1 }
-          if (($ex -band 0x80000) -eq 0) { Write-Host "::error::Window did not become layered"; exit 1 }
+          if (($ex -band 0x80000) -ne 0) { Write-Host "::error::Window became transparent"; exit 1 }
+          if ($icon -notlike '*GlassIntro*') { Write-Host "::error::Icon not replaced: $icon"; exit 1 }

@@ -139,7 +139,6 @@ namespace GlassIntro
         public const string Taskbar = "M 3 17 H 21 V 21 H 3 Z M 6 3 H 18 C 19.7 3 21 4.3 21 6 V 15 H 3 V 6 C 3 4.3 4.3 3 6 3 Z";
         public const string Windows = "M 3 8 H 16 V 21 H 3 Z M 8 3 H 21 V 16 H 18 V 6 H 8 Z";
         public const string Volume = "M 3 9 V 15 H 7 L 13 20 V 4 L 7 9 Z M 16 8 A 5.5 5.5 0 0 1 16 16 L 14.6 14.6 A 3.5 3.5 0 0 0 14.6 9.4 Z";
-        public const string Drop = "M 12 3 C 12 3 19 10 19 15 A 7 7 0 0 1 5 15 C 5 10 12 3 12 3 Z";
     }
 
     /// <summary>Стеклянная поверхность: размытие Windows, блик и пружинное изменение формы.</summary>
@@ -388,63 +387,6 @@ namespace GlassIntro
         private void Draw()
         {
             bar.Width = 42 + Math.Max(0, ActualWidth - 42) * Value;
-        }
-    }
-
-    /// <summary>Сегменты с плавно скользящей подложкой.</summary>
-    internal sealed class Segments : Grid
-    {
-        private readonly Border pill = new Border();
-        private readonly TranslateTransform move = new TranslateTransform();
-        private readonly int count;
-        private int selected;
-
-        public Segments(string[] names, bool[] available, Action<int> pick)
-        {
-            count = names.Length;
-            Height = 38;
-            Margin = new Thickness(5);
-            Background = Ui.Brush(28);
-            Clip = null;
-            Border frame = new Border { CornerRadius = new CornerRadius(19), Background = Ui.Brush(0) };
-            Children.Add(frame);
-            pill.CornerRadius = new CornerRadius(16);
-            pill.Background = Ui.Brush(60);
-            pill.BorderBrush = Ui.Brush(90);
-            pill.BorderThickness = new Thickness(1);
-            pill.Margin = new Thickness(3);
-            pill.HorizontalAlignment = HorizontalAlignment.Left;
-            pill.RenderTransform = move;
-            Children.Add(pill);
-            Grid row = new Grid();
-            for (int i = 0; i < count; i++)
-            {
-                row.ColumnDefinitions.Add(new ColumnDefinition());
-                int index = i;
-                TextBlock label = Ui.Text(names[i], 12.5, (byte)(available[i] ? 255 : 90), FontWeights.Medium);
-                label.HorizontalAlignment = HorizontalAlignment.Center;
-                Grid cell = new Grid { Background = Brushes.Transparent };
-                cell.Children.Add(label);
-                if (available[i]) Ui.Pressable(cell, () => pick(index), 0.96);
-                Grid.SetColumn(cell, i);
-                row.Children.Add(cell);
-            }
-            Children.Add(row);
-            SizeChanged += delegate
-            {
-                pill.Width = Math.Max(1, ActualWidth / count - 6);
-                move.BeginAnimation(TranslateTransform.XProperty, null);
-                move.X = selected * ActualWidth / count;
-                Clip = new RectangleGeometry(new Rect(0, 0, ActualWidth, ActualHeight), 19, 19);
-            };
-        }
-
-        public void Select(int index)
-        {
-            selected = index;
-            if (ActualWidth <= 0) return;
-            move.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(index * ActualWidth / count,
-                TimeSpan.FromMilliseconds(320)) { EasingFunction = new BackEase { Amplitude = 0.35, EasingMode = EasingMode.EaseOut } });
         }
     }
 }

@@ -45,7 +45,7 @@ namespace GlassIntro
                     Log(e.Exception);
                     e.Handled = true;
                 };
-                Shell shell = new Shell();
+                Shell shell = new Shell(args.Length > 0 && args[0] == "--test-panel");
                 app.Run();
                 GC.KeepAlive(shell);
             }
@@ -62,7 +62,7 @@ namespace GlassIntro
         private readonly DispatcherTimer watcher = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         private readonly IntPtr iconHandle;
 
-        public Shell()
+        public Shell(bool testPanel)
         {
             media = new MediaController(Dispatcher.CurrentDispatcher);
             panel = new ControlPanel(engine);
@@ -84,6 +84,12 @@ namespace GlassIntro
             engine.Exited += Exit;
             watcher.Tick += delegate { island.SetSuppressed(engine.IsForegroundFullscreen()); };
             watcher.Start();
+            if (testPanel)
+            {
+                DispatcherTimer test = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                test.Tick += delegate { panel.Toggle(); };
+                test.Start();
+            }
             // Запуск внутри диспетчера, чтобы продолжения после await шли в потоке интерфейса.
             Dispatcher.CurrentDispatcher.BeginInvoke(new Action(() => { var ignored = media.StartAsync(); }));
         }
