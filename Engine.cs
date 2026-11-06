@@ -501,12 +501,21 @@ namespace GlassIntro
 
         private static IconPair LoadPair(string ico)
         {
-            if (ico == null) return null;
+            if (ico == null)
+            {
+                Program.Log(new InvalidOperationException("Не удалось создать значок окна"));
+                return null;
+            }
             const uint IMAGE_ICON = 1, LR_LOADFROMFILE = 0x10;
             IconPair pair = new IconPair();
             pair.Big = Native.LoadImage(IntPtr.Zero, ico, IMAGE_ICON, 48, 48, LR_LOADFROMFILE);
             pair.Small = Native.LoadImage(IntPtr.Zero, ico, IMAGE_ICON, 24, 24, LR_LOADFROMFILE);
-            return pair.Big == IntPtr.Zero ? null : pair;
+            if (pair.Big == IntPtr.Zero)
+            {
+                Program.Log(new InvalidOperationException("Не удалось открыть значок: " + ico));
+                return null;
+            }
+            return pair;
         }
 
         private void RestoreWindowIcons()

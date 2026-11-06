@@ -120,17 +120,15 @@ namespace GlassIntro
                 string result = null;
                 try
                 {
-                    lock (Gate)
+                    // Без общей блокировки: значок окна не должен ждать обработки всех ярлыков.
+                    Directory.CreateDirectory(Folder);
+                    string ico = System.IO.Path.Combine(Folder, Hash(Style + "app" + exe) + ".ico");
+                    if (!File.Exists(ico))
                     {
-                        Directory.CreateDirectory(Folder);
-                        string ico = System.IO.Path.Combine(Folder, Hash(Style + "app" + exe) + ".ico");
-                        if (!File.Exists(ico))
-                        {
-                            BitmapSource source = LoadShellImage(exe);
-                            if (source != null) WriteIco(source, ico);
-                        }
-                        if (File.Exists(ico)) result = ico;
+                        BitmapSource source = LoadShellImage(exe);
+                        if (source != null) WriteIco(source, ico);
                     }
+                    if (File.Exists(ico)) result = ico;
                 }
                 catch (Exception e)
                 {
