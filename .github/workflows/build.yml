@@ -54,5 +54,8 @@ jobs:
           if (Test-Path $log) { Get-Content $log -TotalCount 8 | ForEach-Object { Write-Host "::error::$_" } ; exit 1 }
           if ($crashed) { Write-Host "::error::GlassIntro crashed"; exit 1 }
           if (($ex -band 0x80000) -ne 0) { Write-Host "::error::Window became transparent"; exit 1 }
+          Write-Host "::warning::before=$iconBefore after=$iconAfter"
+          $trace = Join-Path $env:APPDATA 'GlassIntro\trace.log'
+          if (Test-Path $trace) { Get-Content $trace | Select-Object -Last 7 | ForEach-Object { Write-Host "::warning::$_" } } else { Write-Host "::warning::no trace" }
           if ($iconBefore -eq $iconAfter) { Write-Host "::error::Running window icon not replaced"; exit 1 }
           if ($icon -notlike '*GlassIntro*') { Write-Host "::error::Icon not replaced: $icon"; exit 1 }

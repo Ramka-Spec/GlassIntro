@@ -21,9 +21,24 @@ namespace GlassIntro
             catch (IOException) { }
         }
 
+        /// <summary>Подробный журнал только для автоматического теста.</summary>
+        public static bool Tracing;
+
+        public static void Trace(string text)
+        {
+            if (!Tracing) return;
+            try
+            {
+                Directory.CreateDirectory(Settings.Folder);
+                File.AppendAllText(System.IO.Path.Combine(Settings.Folder, "trace.log"), text + Environment.NewLine);
+            }
+            catch (IOException) { }
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
+            Tracing = args.Length > 0 && args[0] == "--test-panel";
             bool created;
             using (Mutex mutex = new Mutex(true, "GlassIntro.SingleInstance", out created))
             {

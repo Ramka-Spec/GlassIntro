@@ -464,11 +464,14 @@ namespace GlassIntro
         private void GlassWindowIcon(IntPtr hwnd)
         {
             if (!settings.Icons || !Native.IsWindow(hwnd)) return;
+            bool trace = Program.Tracing && Native.ClassOf(hwnd).StartsWith("WindowsForms", StringComparison.Ordinal);
+            if (trace) Program.Trace("window owner=" + Native.GetWindow(hwnd, 4) + " eligible=" + IsEligible(hwnd));
             if (Native.GetWindow(hwnd, 4) != IntPtr.Zero) return;
             if (Native.ClassOf(hwnd) == "ApplicationFrameWindow" || !IsEligible(hwnd)) return;
             uint pid;
             Native.GetWindowThreadProcessId(hwnd, out pid);
             string path = PathOf(pid);
+            if (trace) Program.Trace("path=" + path);
             if (path.Length == 0) return;
 
             IconPair pair;
@@ -485,8 +488,10 @@ namespace GlassIntro
                 }
                 return;
             }
+            if (trace) Program.Trace("pair=" + (pair == null ? "null" : pair.Big.ToString()));
             if (pair == null) return;
             IntPtr current = Native.Message(hwnd, Native.WM_GETICON, 1, IntPtr.Zero);
+            if (trace) Program.Trace("current=" + current);
             if (current == pair.Big) return;
             if (!originalIcons.ContainsKey(hwnd))
             {
@@ -497,6 +502,7 @@ namespace GlassIntro
             }
             Native.Message(hwnd, Native.WM_SETICON, 1, pair.Big);
             Native.Message(hwnd, Native.WM_SETICON, 0, pair.Small);
+            if (trace) Program.Trace("after=" + Native.Message(hwnd, Native.WM_GETICON, 1, IntPtr.Zero));
         }
 
         private static IconPair LoadPair(string ico)
