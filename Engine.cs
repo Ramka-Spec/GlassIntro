@@ -2,12 +2,11 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using System.Windows.Threading;
 using Microsoft.Win32;
 
 namespace GlassIntro
@@ -30,6 +29,7 @@ namespace GlassIntro
         public const uint EVENT_SYSTEM_FOREGROUND = 3;
         public const uint EVENT_OBJECT_SHOW = 0x8002;
         public const int WM_HOTKEY = 0x0312;
+        public const long WS_EX_NOACTIVATE = 0x08000000L;
         public const int ACCENT_DISABLED = 0;
         public const int ACCENT_BLUR = 3;
         public const int ACCENT_ACRYLIC = 4;
@@ -85,6 +85,9 @@ namespace GlassIntro
         [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint modifiers, uint key);
         [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
         [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
+        [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] public static extern int SetWindowRgn(IntPtr hwnd, IntPtr region, bool redraw);
+        [DllImport("gdi32.dll")] public static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int width, int height);
         [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
         [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, EntryPoint = "QueryFullProcessImageNameW")]
@@ -129,6 +132,8 @@ namespace GlassIntro
     {
         public bool Enabled = true;
         public bool Taskbar = true;
+        public bool Player = true;
+        public bool Fade = true;
         public Effect Mode;
         public int Percent = 15;
         public int SavedTransparency = -1;
@@ -154,6 +159,8 @@ namespace GlassIntro
                     {
                         case "enabled": s.Enabled = value != 0; break;
                         case "taskbar": s.Taskbar = value != 0; break;
+                        case "player": s.Player = value != 0; break;
+                        case "fade": s.Fade = value != 0; break;
                         case "mode": if (value >= 0 && value <= 2) s.Mode = (Effect)value; break;
                         case "percent": if (value >= 5 && value <= 40) s.Percent = value; break;
                         case "savedTransparency": s.SavedTransparency = value; break;
@@ -172,6 +179,8 @@ namespace GlassIntro
                 File.WriteAllLines(FilePath, new string[] {
                     "enabled=" + (Enabled ? 1 : 0),
                     "taskbar=" + (Taskbar ? 1 : 0),
+                    "player=" + (Player ? 1 : 0),
+                    "fade=" + (Fade ? 1 : 0),
                     "mode=" + (int)Mode,
                     "percent=" + Percent,
                     "savedTransparency=" + SavedTransparency
@@ -207,7 +216,7 @@ namespace GlassIntro
         }
     }
 
-    internal class GlassApp : ApplicationContext
+    internal class GlassEngine
     {
         private const uint GlassTint = 0x30201A1A;
         private const string MenuClass = "#32768";
@@ -226,42 +235,36 @@ namespace GlassIntro
         };
 
         private readonly int build;
-        private readonly Settings settings;
+        public readonly Settings settings;
+        public int Build { get { return build; } }
+        public event Action Changed;
+        public event Action<string> Notify;
+        private sealed class Ramp { public byte From, To; public long Start; }
+        private readonly Dictionary<IntPtr, Ramp> ramps = new Dictionary<IntPtr, Ramp>();
+        private readonly Stopwatch clock = Stopwatch.StartNew();
+        private readonly DispatcherTimer rampTimer = new DispatcherTimer(DispatcherPriority.Render);
+        private DispatcherTimer restoreTimer;
         private readonly Dictionary<IntPtr, long> applied = new Dictionary<IntPtr, long>();
         private readonly HashSet<IntPtr> layeredTaskbars = new HashSet<IntPtr>();
         private readonly Dictionary<uint, string> processNames = new Dictionary<uint, string>();
         private readonly HashSet<string> excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly string excludeFile = Path.Combine(Settings.Folder, "exclude.txt");
-        private readonly NotifyIcon tray = new NotifyIcon();
-        private readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+        private readonly DispatcherTimer timer = new DispatcherTimer();
         private readonly Native.WinEventProc hookProc;
         private readonly HotkeyWindow hotkey;
-        private readonly Icon trayImage;
-        private IntPtr iconHandle = IntPtr.Zero;
         private IntPtr hookForeground;
         private IntPtr hookShow;
         private IntPtr lastGlassIntrodow = IntPtr.Zero;
         private DateTime excludeStamp = DateTime.MinValue;
-        private ToolStripMenuItem enabledItem;
-        private ToolStripMenuItem taskbarItem;
-        private ToolStripMenuItem autostartItem;
-        private readonly List<ToolStripMenuItem> modeItems = new List<ToolStripMenuItem>();
-        private readonly List<ToolStripMenuItem> percentItems = new List<ToolStripMenuItem>();
         private int ticks;
 
-        public GlassApp()
+        public GlassEngine()
         {
             build = ReadBuild();
             settings = Settings.Load(build >= 22000 ? Effect.Acrylic : Effect.Blur);
             if (settings.Mode == Effect.Mica && build < 22621) settings.Mode = Effect.Acrylic;
             LoadExcluded();
             if (settings.Enabled) EnableSystemTransparency();
-
-            trayImage = MakeIcon();
-            tray.Icon = trayImage;
-            tray.Text = "GlassIntro";
-            tray.ContextMenuStrip = BuildMenu();
-            tray.Visible = true;
 
             hookProc = OnWinEvent;
             hookForeground = Native.SetWinEventHook(Native.EVENT_SYSTEM_FOREGROUND, Native.EVENT_SYSTEM_FOREGROUND,
@@ -270,7 +273,9 @@ namespace GlassIntro
                 IntPtr.Zero, hookProc, 0, 0, 0);
             hotkey = new HotkeyWindow(ToggleEnabled);
 
-            timer.Interval = 1500;
+            rampTimer.Interval = TimeSpan.FromMilliseconds(15);
+            rampTimer.Tick += delegate { StepRamps(); };
+            timer.Interval = TimeSpan.FromMilliseconds(1500);
             timer.Tick += delegate { Scan(); };
             timer.Start();
             Scan();
@@ -290,89 +295,7 @@ namespace GlassIntro
             return 0;
         }
 
-        private Icon MakeIcon()
-        {
-            using (Bitmap bmp = new Bitmap(32, 32))
-            using (Graphics g = Graphics.FromImage(bmp))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (LinearGradientBrush fill = new LinearGradientBrush(new Rectangle(0, 0, 32, 32),
-                    Color.FromArgb(235, 170, 225, 255), Color.FromArgb(235, 40, 110, 220), 45f))
-                using (Pen edge = new Pen(Color.White, 2f))
-                {
-                    g.FillEllipse(fill, 3, 3, 26, 26);
-                    g.DrawEllipse(edge, 3, 3, 26, 26);
-                }
-                iconHandle = bmp.GetHicon();
-                return Icon.FromHandle(iconHandle);
-            }
-        }
-
-        private ContextMenuStrip BuildMenu()
-        {
-            ContextMenuStrip menu = new ContextMenuStrip();
-            enabledItem = new ToolStripMenuItem("Стекло включено (Ctrl+Alt+G)");
-            enabledItem.Click += delegate { ToggleEnabled(); };
-            menu.Items.Add(enabledItem);
-            menu.Items.Add(new ToolStripSeparator());
-
-            AddMode(menu, "Акрил: матовое стекло", Effect.Acrylic, true);
-            AddMode(menu, "Размытие: быстрее на Windows 10", Effect.Blur, true);
-            AddMode(menu, "Только заголовки окон (Windows 11)", Effect.Mica, build >= 22621);
-            menu.Items.Add(new ToolStripSeparator());
-
-            ToolStripMenuItem strength = new ToolStripMenuItem("Прозрачность");
-            foreach (int percent in new int[] { 5, 10, 15, 20, 30 })
-            {
-                int current = percent;
-                ToolStripMenuItem item = new ToolStripMenuItem(percent + "%");
-                item.Tag = percent;
-                item.Click += delegate
-                {
-                    settings.Percent = current;
-                    Reapply();
-                };
-                percentItems.Add(item);
-                strength.DropDownItems.Add(item);
-            }
-            menu.Items.Add(strength);
-
-            taskbarItem = new ToolStripMenuItem("Стеклянная панель задач");
-            taskbarItem.Click += delegate
-            {
-                settings.Taskbar = !settings.Taskbar;
-                if (!settings.Taskbar) ClearTaskbar();
-                Reapply();
-            };
-            menu.Items.Add(taskbarItem);
-            menu.Items.Add(new ToolStripSeparator());
-
-            ToolStripMenuItem exclude = new ToolStripMenuItem("Не трогать последнее окно");
-            exclude.Click += delegate { ExcludeLastWindow(); };
-            menu.Items.Add(exclude);
-            ToolStripMenuItem list = new ToolStripMenuItem("Список исключений…");
-            list.Click += delegate { OpenExcludeList(); };
-            menu.Items.Add(list);
-
-            autostartItem = new ToolStripMenuItem("Запускать вместе с Windows");
-            autostartItem.Click += delegate { SetAutostart(!IsAutostart()); UpdateMenu(); };
-            menu.Items.Add(autostartItem);
-            menu.Items.Add(new ToolStripSeparator());
-
-            if (!IsAdministrator())
-            {
-                ToolStripMenuItem admin = new ToolStripMenuItem("Перезапустить от администратора");
-                admin.Click += delegate { RestartAsAdmin(); };
-                menu.Items.Add(admin);
-            }
-            ToolStripMenuItem exit = new ToolStripMenuItem("Выход (вернуть как было)");
-            exit.Click += delegate { Quit(); };
-            menu.Items.Add(exit);
-            UpdateMenu();
-            return menu;
-        }
-
-        private static bool IsAdministrator()
+        public static bool IsAdministrator()
         {
             using (System.Security.Principal.WindowsIdentity id = System.Security.Principal.WindowsIdentity.GetCurrent())
             {
@@ -381,7 +304,7 @@ namespace GlassIntro
             }
         }
 
-        private void RestartAsAdmin()
+        public void RestartAsAdmin()
         {
             try
             {
@@ -394,49 +317,141 @@ namespace GlassIntro
             catch (System.ComponentModel.Win32Exception) { }
         }
 
-        private void AddMode(ContextMenuStrip menu, string title, Effect mode, bool available)
+        public void ToggleEnabled()
         {
-            ToolStripMenuItem item = new ToolStripMenuItem(title);
-            item.Tag = mode;
-            item.Enabled = available;
-            item.Click += delegate
-            {
-                settings.Mode = mode;
-                Reapply();
-            };
-            modeItems.Add(item);
-            menu.Items.Add(item);
+            SetEnabled(!settings.Enabled);
         }
 
-        private void UpdateMenu()
+        public void SetEnabled(bool on)
         {
-            enabledItem.Checked = settings.Enabled;
-            taskbarItem.Checked = settings.Taskbar;
-            autostartItem.Checked = IsAutostart();
-            foreach (ToolStripMenuItem item in modeItems) item.Checked = (Effect)item.Tag == settings.Mode;
-            foreach (ToolStripMenuItem item in percentItems) item.Checked = (int)item.Tag == settings.Percent;
-        }
-
-        private void ToggleEnabled()
-        {
-            settings.Enabled = !settings.Enabled;
-            if (settings.Enabled)
+            settings.Enabled = on;
+            if (restoreTimer != null) { restoreTimer.Stop(); restoreTimer = null; }
+            if (on)
             {
                 EnableSystemTransparency();
+                settings.Save();
+                Scan();
             }
             else
             {
                 ClearTaskbar();
                 RestoreSystemTransparency();
+                settings.Save();
+                if (settings.Fade && settings.Mode != Effect.Mica)
+                {
+                    foreach (IntPtr h in applied.Keys) StartRamp(h, TargetAlpha(), 255);
+                    restoreTimer = new DispatcherTimer();
+                    restoreTimer.Interval = TimeSpan.FromMilliseconds(240);
+                    restoreTimer.Tick += delegate
+                    {
+                        restoreTimer.Stop();
+                        restoreTimer = null;
+                        ramps.Clear();
+                        RestoreAll();
+                    };
+                    restoreTimer.Start();
+                }
+                else
+                {
+                    RestoreAll();
+                }
             }
+            RaiseChanged();
+        }
+
+        public void SetMode(Effect mode)
+        {
+            settings.Mode = mode;
             Reapply();
+        }
+
+        public void SetPercent(int percent)
+        {
+            settings.Percent = percent;
+            if (settings.Mode != Effect.Mica)
+            {
+                ramps.Clear();
+                foreach (IntPtr h in applied.Keys)
+                    Native.SetLayeredWindowAttributes(h, 0, TargetAlpha(), Native.LWA_ALPHA);
+            }
+            settings.Save();
+            RaiseChanged();
+        }
+
+        public void SetTaskbar(bool on)
+        {
+            settings.Taskbar = on;
+            if (!on) ClearTaskbar();
+            Reapply();
+        }
+
+        public void SetFade(bool on)
+        {
+            settings.Fade = on;
+            settings.Save();
+            RaiseChanged();
+        }
+
+        public void SetPlayer(bool on)
+        {
+            settings.Player = on;
+            settings.Save();
+            RaiseChanged();
+        }
+
+        /// <summary>Активное окно занимает весь экран: игра или видео.</summary>
+        public bool IsForegroundFullscreen()
+        {
+            IntPtr h = Native.GetForegroundWindow();
+            if (h == IntPtr.Zero) return false;
+            string cls = Native.ClassOf(h);
+            if (cls == "Progman" || cls == "WorkerW") return false;
+            return IsFullscreen(h);
+        }
+
+        private byte TargetAlpha()
+        {
+            return (byte)(255 * (100 - settings.Percent) / 100);
+        }
+
+        private void RaiseChanged()
+        {
+            Action handler = Changed;
+            if (handler != null) handler();
+        }
+
+        private void StartRamp(IntPtr h, byte from, byte to)
+        {
+            Ramp r = new Ramp();
+            r.From = from;
+            r.To = to;
+            r.Start = clock.ElapsedMilliseconds;
+            ramps[h] = r;
+            if (!rampTimer.IsEnabled) rampTimer.Start();
+        }
+
+        private void StepRamps()
+        {
+            long now = clock.ElapsedMilliseconds;
+            List<IntPtr> finished = new List<IntPtr>();
+            foreach (KeyValuePair<IntPtr, Ramp> pair in ramps)
+            {
+                double t = Math.Min(1.0, (now - pair.Value.Start) / 220.0);
+                double eased = 1 - Math.Pow(1 - t, 3);
+                byte alpha = (byte)Math.Round(pair.Value.From + (pair.Value.To - pair.Value.From) * eased);
+                Native.SetLayeredWindowAttributes(pair.Key, 0, alpha, Native.LWA_ALPHA);
+                if (t >= 1.0) finished.Add(pair.Key);
+            }
+            foreach (IntPtr h in finished) ramps.Remove(h);
+            if (ramps.Count == 0) rampTimer.Stop();
         }
 
         private void Reapply()
         {
+            ramps.Clear();
             RestoreAll();
             settings.Save();
-            UpdateMenu();
+            RaiseChanged();
             Scan();
         }
 
@@ -454,7 +469,7 @@ namespace GlassIntro
             Native.EnumWindows(delegate(IntPtr h, IntPtr p) { windows.Add(h); return true; }, IntPtr.Zero);
             foreach (IntPtr h in windows)
             {
-                Process(h);
+                Process(h, false);
                 if (settings.Taskbar)
                 {
                     string cls = Native.ClassOf(h);
@@ -487,11 +502,11 @@ namespace GlassIntro
         private void OnWinEvent(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
         {
             if (hwnd == IntPtr.Zero || idObject != 0 || idChild != 0) return;
-            if (settings.Enabled) Process(hwnd);
+            if (settings.Enabled) Process(hwnd, evt == Native.EVENT_OBJECT_SHOW);
             if (evt == Native.EVENT_SYSTEM_FOREGROUND && applied.ContainsKey(hwnd)) lastGlassIntrodow = hwnd;
         }
 
-        private void Process(IntPtr hwnd)
+        private void Process(IntPtr hwnd, bool appearing)
         {
             if (!IsEligible(hwnd))
             {
@@ -512,7 +527,16 @@ namespace GlassIntro
                 // Окна, которые рисуют прозрачность сами, трогать нельзя: они перестанут отображаться.
                 if ((exStyle & Native.WS_EX_LAYERED) != 0) return;
                 Native.SetWindowLongPtr(hwnd, Native.GWL_EXSTYLE, new IntPtr(exStyle | Native.WS_EX_LAYERED));
-                Native.SetLayeredWindowAttributes(hwnd, 0, (byte)(255 * (100 - settings.Percent) / 100), Native.LWA_ALPHA);
+                bool menu = Native.ClassOf(hwnd) == MenuClass;
+                if (appearing && settings.Fade && !menu)
+                {
+                    Native.SetLayeredWindowAttributes(hwnd, 0, 130, Native.LWA_ALPHA);
+                    StartRamp(hwnd, 130, TargetAlpha());
+                }
+                else
+                {
+                    Native.SetLayeredWindowAttributes(hwnd, 0, TargetAlpha(), Native.LWA_ALPHA);
+                }
                 Native.SetAccent(hwnd, settings.Mode == Effect.Blur ? Native.ACCENT_BLUR : Native.ACCENT_ACRYLIC, GlassTint);
             }
             applied[hwnd] = exStyle;
@@ -601,6 +625,7 @@ namespace GlassIntro
             long original;
             if (!applied.TryGetValue(hwnd, out original)) return;
             applied.Remove(hwnd);
+            ramps.Remove(hwnd);
             if (!Native.IsWindow(hwnd)) return;
             int auto = 0;
             Native.DwmSetWindowAttribute(hwnd, Native.DWMWA_SYSTEMBACKDROP_TYPE, ref auto, sizeof(int));
@@ -693,11 +718,11 @@ namespace GlassIntro
             catch (IOException) { }
         }
 
-        private void ExcludeLastWindow()
+        public void ExcludeLastWindow()
         {
             if (lastGlassIntrodow == IntPtr.Zero || !Native.IsWindow(lastGlassIntrodow))
             {
-                tray.ShowBalloonTip(3000, "GlassIntro", "Сначала щёлкни по окну, которое не нужно менять", ToolTipIcon.Info);
+                if (Notify != null) Notify("Сначала щёлкни по окну, которое не нужно менять");
                 return;
             }
             string name = ProcessNameOf(lastGlassIntrodow);
@@ -709,10 +734,10 @@ namespace GlassIntro
             catch (IOException) { return; }
             LoadExcluded();
             Reapply();
-            tray.ShowBalloonTip(3000, "GlassIntro", "Больше не меняю: " + name, ToolTipIcon.Info);
+            if (Notify != null) Notify("Больше не меняю: " + name);
         }
 
-        private void OpenExcludeList()
+        public void OpenExcludeList()
         {
             try
             {
@@ -721,7 +746,7 @@ namespace GlassIntro
             catch (System.ComponentModel.Win32Exception) { }
         }
 
-        private static bool IsAutostart()
+        public static bool IsAutostart()
         {
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKey))
             {
@@ -729,7 +754,7 @@ namespace GlassIntro
             }
         }
 
-        private static void SetAutostart(bool on)
+        public static void SetAutostart(bool on)
         {
             using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RunKey, true))
             {
@@ -739,44 +764,21 @@ namespace GlassIntro
             }
         }
 
-        private void Quit()
+        public void Quit()
         {
             timer.Stop();
+            rampTimer.Stop();
+            ramps.Clear();
             if (hookForeground != IntPtr.Zero) Native.UnhookWinEvent(hookForeground);
             if (hookShow != IntPtr.Zero) Native.UnhookWinEvent(hookShow);
             hotkey.Release();
             RestoreAll();
             ClearTaskbar();
             RestoreSystemTransparency();
-            tray.Visible = false;
-            tray.Dispose();
-            trayImage.Dispose();
-            if (iconHandle != IntPtr.Zero) Native.DestroyIcon(iconHandle);
-            ExitThread();
+            Action handler = Exited;
+            if (handler != null) handler();
         }
-    }
 
-    internal static class Program
-    {
-        [STAThread]
-        private static void Main(string[] args)
-        {
-            bool created;
-            using (System.Threading.Mutex mutex = new System.Threading.Mutex(true, "GlassIntro.SingleInstance", out created))
-            {
-                if (!created)
-                {
-                    if (args.Length == 0 || args[0] != "--wait") return;
-                    try
-                    {
-                        if (!mutex.WaitOne(15000)) return;
-                    }
-                    catch (System.Threading.AbandonedMutexException) { }
-                }
-                Application.EnableVisualStyles();
-                Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new GlassApp());
-            }
-        }
+        public event Action Exited;
     }
 }

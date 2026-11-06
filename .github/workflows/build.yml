@@ -7,13 +7,21 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
       - name: Compile
-        shell: cmd
-        run: '"%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /platform:x64 /optimize+ /codepage:65001 /out:GlassIntro.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll GlassIntro.cs'
+        shell: pwsh
+        run: |
+          dotnet build GlassIntro.csproj -c Release --nologo -v q -clp:NoSummary 2>&1 | Tee-Object build.log
+          if ($LASTEXITCODE -ne 0) {
+            Select-String -Path build.log -Pattern ': error ' | Select-Object -First 20 | ForEach-Object { Write-Host "::error::$($_.Line)" }
+            exit 1
+          }
       - uses: actions/upload-artifact@v4
         with:
           name: GlassIntro
-          path: GlassIntro.exe
+          path: bin/out/
   smoke-test:
     needs: build
     runs-on: windows-latest
@@ -21,7 +29,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: GlassIntro
-      - name: Check that a test window becomes glass
+      - name: Start app and check a test window
         shell: powershell
         run: |
           Add-Type -AssemblyName System.Windows.Forms
@@ -30,10 +38,11 @@ jobs:
           $form = New-Object System.Windows.Forms.Form
           $form.Text = 'glass-test'
           $form.Show()
-          1..80 | ForEach-Object { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+          1..100 | ForEach-Object { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
           $ex = [W]::G($form.Handle, -20).ToInt64()
-          Write-Host ("ExStyle: 0x{0:X}, exited: {1}" -f $ex, $app.HasExited)
           $crashed = $app.HasExited
           if (-not $crashed) { Stop-Process -Id $app.Id -Force }
-          if ($crashed) { throw 'GlassIntro crashed' }
-          if (($ex -band 0x80000) -eq 0) { throw 'Window did not become layered' }
+          $log = Join-Path $env:APPDATA 'GlassIntro\error.log'
+          if (Test-Path $log) { Get-Content $log -TotalCount 6 | ForEach-Object { Write-Host "::error::$_" } ; exit 1 }
+          if ($crashed) { Write-Host "::error::GlassIntro crashed"; exit 1 }
+          if (($ex -band 0x80000) -eq 0) { Write-Host "::error::Window did not become layered"; exit 1 }
